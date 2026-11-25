@@ -32,7 +32,7 @@ const ICON = {
   redo: 'M19 12a7 7 0 1 1-2.100-5M19 4v4h-4',
 };
 const LABEL = {
-  sicher: 'Sicher', pruefen: 'Prüfen', lokal: 'Nur Dateiname', kein: 'Kein Treffer', vorhanden: 'Schon in Plex', konflikt: 'Konflikt',
+  sicher: 'Sicher', pruefen: 'Prüfen', lokal: 'Nur Dateiname', kein: 'Kein Treffer', vorhanden: 'Schon in Plex', konflikt: 'Konflikt', ersetzen: 'Ersetzen',
   laeuft: 'Noch in Arbeit', fertig: 'Fertig', fehler: 'Fehler', wartet: 'Wartet',
   stimmt: 'Stimmt', abweichend: 'Weicht ab', fehlt: 'Fehlt', berechnet: 'Berechnet', rechnet: 'Rechnet', fremd: 'Fremder Pfad',
 };
@@ -43,7 +43,7 @@ const OPEN = ['pruefen', 'lokal', 'kein', 'konflikt', 'fehler'];
 let S = null, rows = [], page = 'transfer', sel = new Set(), anchor = null, filter = 'alle', pop = null, lastInfo = '', wasBusy = '';
 const byId = new Map();
 const U = { shows: [], show: -1, eps: null, epsText: '', epsNote: '', sums: [], hist: [], keyMsg: {}, fmtMsg: {}, search: {}, subs: [], subLang: 'de', subBusy: -1,
-  draft: {}, pathMsg: {}, found: undefined, aliases: [], partials: null };
+  draft: {}, pathMsg: {}, found: undefined, aliases: [], partials: null, alts: null };
 
 /* ---------------------------------------------------------------- Bausteine */
 function h(tag, props, ...kids) {
@@ -312,14 +312,16 @@ function dock() {
   btn('Übertragen …', () => confirmTransfer(todo), { cls: '.blue', off: !todo.length }));
 }
 function confirmTransfer(todo) {
-  const list = todo.map(r => ({ id: r.id, dst: r.dst })), total = todo.reduce((a, r) => a + r.size, 0), open = todo.filter(r => r.status !== 'sicher').length;
-  let action = 'copy'; // jedes Mal neu: Verschieben ist nie voreingestellt
+  const list = todo.map(r => ({ id: r.id, dst: r.dst, old: r.replace ? r.old.path : undefined })), swaps = todo.filter(r => r.replace), total = todo.reduce((a, r) => a + r.size, 0), open = todo.filter(r => !['sicher', 'ersetzen'].includes(r.status)).length;
+  let keepOld = 'nein', action = 'copy'; // jedes Mal neu: Verschieben ist nie voreingestellt
   sheet(() => [h('h2', { id: 'sheet-title' }, `${plural(todo.length, 'Datei', 'Dateien')} übertragen? (${gb(total)})`),
-    h('.plan', { 'data-keep': 'plan', tabindex: '0', 'aria-label': 'Geplante Ziele' }, todo.map(r => h('div', null, h('b', null, r.file), h('span', null, '→ ' + r.dst)))),
+    h('.plan', { 'data-keep': 'plan', tabindex: '0', 'aria-label': 'Geplante Ziele' }, todo.map(r => h('div', null, h('b', null, r.file), h('span', null, '→ ' + r.dst), r.replace ? h('span.swap', null, `ersetzt ${r.old.path} (${gb(r.old.size)})`) : null))),
     open ? h('.note', null, `${open} davon hast du selbst bestätigt oder ausgewählt, ohne dass eine Quelle sie sicher kennt.`) : null,
+    swaps.length ? [seg([['nein', 'Alte Fassung löschen'], ['ja', 'Alte Fassung aufheben']], keepOld, k => { keepOld = k; drawSheet(); }),
+      h('p.why', null, keepOld === 'ja' ? 'Sie bleibt als .spool-alt im selben Ordner; Plex übersieht sie, Rückgängig ist möglich.' : `${plural(swaps.length, 'vorhandene Datei wird', 'vorhandene Dateien werden')} endgültig gelöscht, sobald die neue geprüft an ihrem Platz liegt.`)] : null,
     seg([['copy', 'Kopieren'], ['move', 'Verschieben']], action, k => { action = k; drawSheet(); }),
     h('p', { style: 'margin-top:14px' }, action === 'move' ? 'Die Originale werden nach bestandener Prüfsumme endgültig gelöscht, nicht in den Papierkorb gelegt.' : 'Die Originale bleiben, wo sie sind.'),
-    h('.acts', null, btn('Zurück', closeSheet), btn(action === 'move' ? `${todo.length} verschieben` : `${todo.length} kopieren`, () => { closeSheet(); act('transfer', list, action); }, { cls: action === 'move' ? '.red' : '.blue' }))], '.wide');
+    h('.acts', null, btn('Zurück', closeSheet), btn((action === 'move' ? `${todo.length} verschieben` : `${todo.length} kopieren`) + (swaps.length ? `, davon ${swaps.length} ersetzen` : ''), () => { closeSheet(); act('transfer', list, action, keepOld === 'ja'); }, { cls: action === 'move' || swaps.length && keepOld === 'nein' ? '.red' : '.blue', key: 'go' }))], '.wide');
 }
 function inspector() {
   const list = picked(), r = list[0];
@@ -343,6 +345,7 @@ function inspector() {
       r.sources.length ? h('.chips', null, r.sources.map(s => h('span.chip', null, srcName(s)))) : null),
     r.overview ? h('.txt', { title: r.overview }, r.overview) : null,
     r.note ? h('.note', null, r.note) : null,
+    replaceBox(list, ids, busy),
     ok ? btn(later ? 'Trotzdem verwenden' : 'Treffer bestätigen', () => act('approve', ids), { cls: '.blue.wide', off: busy }) : null,
     r.cands.length ? h('div', null, h('.lab', null, 'Treffer'), h('.opts', { 'data-keep': 'opts' }, r.cands.map((c, i) =>
       h('button' + (i === r.pick ? '.on' : ''), { disabled: busy, 'data-focus': 'c' + i, onclick: () => act('pick', ids, i) }, h('span', null, c.label), h('em', null, `${c.score} %`))))) : null,
@@ -355,6 +358,17 @@ function inspector() {
     list.length === 1 && r.checkable ? h('div', null, h('.lab', null, 'Zielname'),
       h('.pair', null, input('nm', r.name, v => act('rename', r.id, v).then(() => { delete U.draft.nm; render(); }), { label: 'Zielname', enterOnly: true }), btn('Ändern', () => act('rename', r.id, U.draft.nm ?? r.name).then(() => { delete U.draft.nm; render(); }), { off: busy, key: 'nm' }))) : null,
     h('.pair', null, btn('Ordner zeigen', () => call('reveal', r.id), { cls: '.plain' }), btn('Entfernen', () => { sel.clear(); act('remove', ids); }, { cls: '.plain', off: busy, tip: 'Nur aus der Liste, die Datei bleibt' })));
+}
+/* Vorhandene Datei: vergleichen und auf Wunsch zum Ersetzen vormerken. Passieren tut es erst im Dialog. */
+function replaceBox(list, ids, busy) {
+  const can = list.filter(r => r.old && !r.replace && ['konflikt', 'vorhanden'].includes(r.status)), on = list.filter(r => r.replace);
+  if (!can.length && !on.length) return null;
+  const r = (on.length ? on : can)[0], one = list.length === 1;
+  return h('.cmp', null,
+    one ? [h('div', null, h('span', null, 'In Plex'), h('b', null, r.old.name), h('em', null, gb(r.old.size))), h('div', null, h('span', null, 'Neu'), h('b', null, r.file), h('em', null, gb(r.size)))] : null,
+    one && r.size < r.old.size * .75 ? h('p', null, 'Die neue Datei ist deutlich kleiner als die vorhandene.') : null,
+    on.length ? btn('Doch nicht ersetzen', () => act('replace', on.map(x => x.id), false), { cls: '.wide', off: busy })
+      : btn(one ? 'Vorhandene Datei ersetzen' : `${can.length} vorhandene ersetzen`, () => act('replace', can.map(x => x.id), true), { cls: '.wide.warn', off: busy, tip: 'Merkt das Ersetzen vor, ausgeführt wird erst nach der Übersicht' }));
 }
 function drawPop() {
   const layer = document.getElementById('layer');
@@ -521,6 +535,8 @@ const viewAbout = () => h('.page', null, h('.head', null, h('h1', null, 'Über S
     h('h3', null, 'Aufräumen'),
     h('.set', null, line('Angefangene Kopien', U.partials === null ? 'Reste abgebrochener Übertragungen in deiner Bibliothek' : U.partials.length ? null : 'Keine gefunden', btn('Suchen', async () => { U.partials = await call('partials') || []; render(); }, { key: 'part' })),
       (U.partials || []).map(p => line(p.path, gb(p.bytes), btn('Löschen', async () => { const m = await call('partial_delete', p.path); if (m) toast(m); U.partials = await call('partials') || []; render(); }, { cls: '.plain', off: !!S.busy, key: p.path }))),
+      line('Aufgehobene alte Fassungen', U.alts === null ? 'Beim Ersetzen beiseitegelegte Dateien' : U.alts.length ? null : 'Keine gefunden', btn('Suchen', async () => { U.alts = await call('partials', 'alt') || []; render(); }, { key: 'alt' })),
+      (U.alts || []).map(p => line(p.path, gb(p.bytes), btn('Zurückholen', async () => { const m = await call('alt_restore', p.path); if (m) toast(m); U.alts = await call('partials', 'alt') || []; render(); }, { off: !!S.busy, key: 'r' + p.path }), btn('Löschen', async () => { const m = await call('partial_delete', p.path); if (m) toast(m); U.alts = await call('partials', 'alt') || []; render(); }, { cls: '.plain', off: !!S.busy, key: 'd' + p.path }))),
       line('Zwischenspeicher', 'Antworten der Datenquellen, werden bei Bedarf neu geladen', btn('Leeren', () => call('cache_clear').then(() => toast('Geleert')), { key: 'cache' }))))));
 
 const VIEW = { transfer: viewTransfer, episodes: viewEpisodes, subs: viewSubs, sums: viewSums, history: viewHistory, settings: viewSettings, about: viewAbout };

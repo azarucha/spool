@@ -2087,7 +2087,7 @@ dependencies = [
 
 [[package]]
 name = "kern"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "chrono",
  "crc32fast",
@@ -3720,7 +3720,7 @@ dependencies = [
 
 [[package]]
 name = "spool"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "kern",
  "rfd",

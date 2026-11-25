@@ -153,9 +153,9 @@ fn cancel_keeps_partial_and_resumes() {
     let e = copy::copy(&copy::hold(&a).unwrap(), &dst, &|_, pos, _| pos < 8_000_000).unwrap_err();
     assert_eq!(e.kind(), std::io::ErrorKind::Interrupted);
     assert!(!dst.exists() && copy::partial(&dst).exists());
-    assert_eq!(copy::leftovers(&[l.p("mv")]), [copy::partial(&dst)]);
+    assert_eq!(copy::leftovers(&[l.p("mv")], copy::PARTIAL), [copy::partial(&dst)]);
     copy::copy(&copy::hold(&a).unwrap(), &dst, &quiet).unwrap();
-    assert!(fs::read(&dst).unwrap() == data && copy::leftovers(&[l.p("mv")]).is_empty());
+    assert!(fs::read(&dst).unwrap() == data && copy::leftovers(&[l.p("mv")], copy::PARTIAL).is_empty());
 }
 
 #[test]
@@ -674,4 +674,159 @@ fn damaged_settings_are_kept_aside() {
     fs::write(HOME.path().join("settings.json"), "{kaputt").unwrap();
     assert!(Settings::load().tv.is_empty());
     assert!(HOME.path().join("settings.json.bad").exists() || HOME.path().join("settings.json.bad").with_extension("bad").exists());
+}
+
+// ---------------------------------------------------------------- Ersetzen
+
+fn replaceable(l: &Lib, old_name: &str, old: &[u8], new: &[u8]) -> Row {
+    l.file(&format!("mv/Old (2021)/{old_name}"), old);
+    let a = l.file("src/Old 2021.mp4", new);
+    matched(l, &[a], source(vec![film("1", "Old", Some(2021))], vec![]), &HashMap::new()).remove(0)
+}
+
+fn allow(l: &Lib, r: &mut Row) {
+    r.replace = r.old.clone();
+    let no = HashMap::new();
+    resolve(r, &l.cfg(), &Library::new(&l.p("tv"), &no), &Library::new(&l.p("mv"), &no));
+}
+
+fn names_in(p: &Path) -> Vec<String> {
+    let mut v: Vec<String> = fs::read_dir(p).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn replacing_needs_an_explicit_choice() {
+    let l = Lib::new();
+    let mut r = replaceable(&l, "Old (2021).mkv", b"alt alt", b"neu");
+    assert_eq!((r.status, r.checked, r.old.is_some()), (Status::Conflict, false, true));
+    assert!(execute(&mut { let mut x = r.clone(); x.dst = Some(l.p("mv/Old (2021)/Old (2021).mkv")); x }, "copy", &mut |_| Ok(()), &quiet).is_err());
+    allow(&l, &mut r);
+    assert_eq!((r.status, r.checked), (Status::Replace, true));
+    assert!(r.dst.as_ref().unwrap().ends_with("Old (2021)/Old (2021).mp4"));
+}
+
+#[test]
+fn replace_other_extension_and_delete_old() {
+    for action in ["copy", "move"] {
+        let l = Lib::new();
+        let mut r = replaceable(&l, "Old (2021).mkv", b"alt alt", b"neu");
+        allow(&l, &mut r);
+        let mut log = vec![];
+        execute(&mut r, action, &mut keep(&mut log), &quiet).unwrap();
+        assert_eq!(names_in(&l.p("mv/Old (2021)")), ["Old (2021).mp4"], "{action}");
+        assert_eq!(fs::read(l.p("mv/Old (2021)/Old (2021).mp4")).unwrap(), b"neu");
+        assert_eq!(l.p("src/Old 2021.mp4").exists(), action == "copy");
+        let e = undo(&log[0], &l.cfg(), &mut |_| Ok(()), &quiet).unwrap_err();
+        assert!(e.to_string().contains("gelöscht") && l.p("mv/Old (2021)/Old (2021).mp4").exists());
+    }
+}
+
+#[test]
+fn replace_same_name_keep_old_and_undo() {
+    for action in ["copy", "move"] {
+        let l = Lib::new();
+        let mut r = replaceable(&l, "Old (2021).mp4", b"alt alt", b"neu");
+        allow(&l, &mut r);
+        r.keep_old = true;
+        let mut log = vec![];
+        execute(&mut r, action, &mut keep(&mut log), &quiet).unwrap();
+        assert_eq!(names_in(&l.p("mv/Old (2021)")), ["Old (2021).mp4", "Old (2021).mp4.spool-alt"]);
+        let alt = copy::leftovers(&[l.p("mv")], copy::KEPT);
+        assert_eq!(copy::original_name(&alt[0]), Some(l.p("mv/Old (2021)/Old (2021).mp4")));
+        undo(&log[0], &l.cfg(), &mut |_| Ok(()), &quiet).unwrap();
+        assert_eq!(names_in(&l.p("mv/Old (2021)")), ["Old (2021).mp4"]);
+        assert_eq!(fs::read(l.p("mv/Old (2021)/Old (2021).mp4")).unwrap(), b"alt alt");
+        assert_eq!(fs::read(l.p("src/Old 2021.mp4")).unwrap(), b"neu");
+    }
+}
+
+#[test]
+fn failed_replacement_leaves_everything_as_before() {
+    for action in ["copy", "move"] {
+        let l = Lib::new();
+        let mut r = replaceable(&l, "Old (2021).mp4", b"alt alt", b"neu");
+        allow(&l, &mut r);
+        // Verlauf nicht schreibbar
+        assert!(execute(&mut r.clone(), action, &mut |_| Err(std::io::Error::other("voll")), &quiet).is_err());
+        // Abbruch waehrend des Kopierens
+        if action == "copy" {
+            assert!(execute(&mut r.clone(), action, &mut |_| Ok(()), &|p, _, _| p != "copy").is_err());
+        }
+        assert_eq!(fs::read(l.p("mv/Old (2021)/Old (2021).mp4")).unwrap(), b"alt alt");
+        assert_eq!(fs::read(l.p("src/Old 2021.mp4")).unwrap(), b"neu");
+        assert!(copy::leftovers(&[l.p("mv")], copy::KEPT).is_empty());
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn old_file_in_use_is_not_replaced() {
+    let l = Lib::new();
+    let mut r = replaceable(&l, "Old (2021).mp4", b"alt alt", b"neu");
+    allow(&l, &mut r);
+    let lock = locked(&l.p("mv/Old (2021)/Old (2021).mp4"), 1); // wird gerade abgespielt
+    assert!(execute(&mut r.clone(), "move", &mut |_| Ok(()), &quiet).is_err());
+    drop(lock);
+    assert_eq!(fs::read(l.p("mv/Old (2021)/Old (2021).mp4")).unwrap(), b"alt alt");
+    assert!(l.p("src/Old 2021.mp4").exists());
+}
+
+#[test]
+fn changed_old_file_withdraws_the_permission() {
+    let l = Lib::new();
+    let mut r = replaceable(&l, "Old (2021).mp4", b"alt alt", b"neu");
+    allow(&l, &mut r);
+    l.file("mv/Old (2021)/Old (2021).mp4", b"inzwischen bessere Fassung");
+    assert!(execute(&mut r.clone(), "copy", &mut |_| Ok(()), &quiet).unwrap_err().to_string().contains("geändert"));
+    let no = HashMap::new();
+    resolve(&mut r, &l.cfg(), &Library::new(&l.p("tv"), &no), &Library::new(&l.p("mv"), &no));
+    assert_eq!((r.status, r.replace.is_none()), (Status::Conflict, true));
+}
+
+#[test]
+fn some_files_must_not_be_replaced() {
+    let l = Lib::new();
+    // Doppelfolge enthaelt noch eine andere Folge
+    l.file("tv/Silo/Season 01/Silo - S01E01-E02.mkv", b"y");
+    let a = l.file("src/Silo.S01E02.mkv", b"xx");
+    let r = &matched(&l, &[a], source(vec![tv("1", "Silo", 2023)], eps()), &HashMap::new())[0];
+    assert!(r.status == Status::Conflict && r.old.is_none() && r.note.contains("weitere Folgen"), "{}", r.note);
+    // mehrere fremde Videos im Filmordner
+    l.file("mv/Old (2021)/Teil A.mkv", b"a");
+    l.file("mv/Old (2021)/Teil B.mkv", b"bb");
+    let b = l.file("src/Old 2021.mp4", b"neu");
+    let r = &matched(&l, &[b], source(vec![film("1", "Old", Some(2021))], vec![]), &HashMap::new())[0];
+    assert!(r.status == Status::Conflict && r.old.is_none() && r.note.contains("mehrere Videos"), "{}", r.note);
+    // die Datei selbst
+    let c = l.file("mv/Neu (2022)/Neu (2022).mkv", b"neu");
+    let r = &matched(&l, &[c], source(vec![film("1", "Neu", Some(2022))], vec![]), &HashMap::new())[0];
+    assert!(r.old.is_none());
+}
+
+#[test]
+fn dialog_must_have_shown_what_is_replaced() {
+    let _g = fresh();
+    let l = Lib::new();
+    l.file("mv/Old (2021)/Old (2021).mkv", b"alt alt");
+    let a = api(&l.cfg(), source(vec![film("1", "Old", Some(2021))], vec![]), Ui::default());
+    a.add(vec![l.file("src/Old 2021.mp4", b"neu")], false);
+    let r = idle(&a)["rows"][0].clone();
+    assert_eq!((r["status"].as_str(), r["old"]["name"].as_str(), r["checked"].as_bool()), (Some("konflikt"), Some("Old (2021).mkv"), Some(false)));
+    a.call("replace", &[json!([1]), json!(true)]);
+    let r = idle(&a)["rows"][0].clone();
+    assert_eq!((r["status"].as_str(), r["replace"].as_bool(), r["checked"].as_bool()), (Some("ersetzen"), Some(true), Some(true)));
+    let without = json!([{ "id": 1, "dst": r["dst"] }]);
+    assert!(a.call("transfer", &[without, json!("copy"), json!(false)]).as_str().unwrap().contains("ersetzt"));
+    a.call("replace", &[json!([1]), json!(false)]);
+    assert_eq!(idle(&a)["rows"][0]["status"], "konflikt");
+    a.call("replace", &[json!([1]), json!(true)]);
+    let r = idle(&a)["rows"][0].clone();
+    let shown = json!([{ "id": 1, "dst": r["dst"], "old": r["old"]["path"] }]);
+    assert_eq!(a.call("transfer", &[shown, json!("copy"), json!(true)]), json!(""));
+    assert!(idle(&a)["rows"][0]["note"].as_str().unwrap().contains("alte Fassung aufgehoben"));
+    let alt = a.call("partials", &[json!("alt")]);
+    assert!(!a.call("alt_restore", &[alt[0]["path"].clone()]).as_str().unwrap().contains("andere Datei"));
+    assert_eq!(names_in(&l.p("mv/Old (2021)")), ["Old (2021).mkv", "Old (2021).mp4"]);
 }

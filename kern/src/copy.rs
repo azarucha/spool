@@ -1,4 +1,5 @@
-//! Kopieren mit Fortsetzen, Pruefsumme und Wiederholung. Ueberschreibt nie.
+//! Kopieren mit Fortsetzen, Pruefsumme und Wiederholung. Ueberschreibt nie; Ersetzen nur ausdruecklich,
+//! und die alte Fassung weicht erst, wenn die neue geprueft bereitliegt.
 //!
 //! Die Quelle wird so geoeffnet, dass niemand sie waehrenddessen schreiben kann; die Teildatei so,
 //! dass es nur einen Schreiber gibt. Beide Griffe bleiben bis zum Schluss offen.
@@ -11,6 +12,8 @@ use std::time::Duration;
 pub const CHUNK: usize = 4 * 1024 * 1024;
 pub const RESERVE: u64 = 5 << 30;
 pub const PARTIAL: &str = "spool-partial";
+/// Endung, unter der eine ersetzte Datei beiseitegelegt wird (Plex ignoriert sie).
+pub const KEPT: &str = "spool-alt";
 
 /// (Phase "copy" | "verify", Bytes, Gesamt) -> weitermachen?
 pub type Progress<'a> = &'a (dyn Fn(&str, u64, u64) -> bool + Sync);
@@ -152,8 +155,47 @@ pub fn other_volume(e: &io::Error) -> bool {
     cfg!(windows) && e.raw_os_error() == Some(17) || e.kind() == io::ErrorKind::CrossesDevices
 }
 
-fn copy_once(src: &File, dst: &Path, progress: Progress) -> io::Result<String> {
-    if dst.exists() {
+/// Derselbe Pfad, unabhaengig von Schreibweise und Laufwerksbuchstabe?
+pub fn same_path(a: &Path, b: &Path) -> bool {
+    let full = |p: &Path| fs::canonicalize(p).or_else(|_| std::path::absolute(p)).unwrap_or_else(|_| p.into()).to_string_lossy().to_lowercase();
+    full(a) == full(b)
+}
+
+fn kept_name(old: &Path) -> PathBuf {
+    let name = old.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let mut out = old.with_file_name(format!("{name}.{KEPT}"));
+    let mut n = 2;
+    while out.exists() {
+        out = old.with_file_name(format!("{name}.{n}.{KEPT}"));
+        n += 1;
+    }
+    out
+}
+
+/// Urspruenglicher Pfad einer beiseitegelegten Datei.
+pub fn original_name(kept: &Path) -> Option<PathBuf> {
+    let name = kept.file_name()?.to_string_lossy().into_owned();
+    let base = name.strip_suffix(&format!(".{KEPT}"))?;
+    let base = match base.rsplit_once('.') {
+        Some((b, n)) if !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()) && b.contains('.') => b,
+        _ => base,
+    };
+    Some(kept.with_file_name(base))
+}
+
+/// `new` an die Stelle `dst` bringen und `old` beiseitelegen. Scheitert der zweite Schritt, ist alles wie vorher.
+pub fn swap(new: &Path, dst: &Path, old: &Path) -> io::Result<PathBuf> {
+    let kept = kept_name(old);
+    rename_new(old, &kept)?;
+    if let Err(e) = rename_new(new, dst) {
+        rename_new(&kept, old)?;
+        return Err(e);
+    }
+    Ok(kept)
+}
+
+fn copy_once(src: &File, dst: &Path, old: Option<&Path>, progress: Progress) -> io::Result<(String, Option<PathBuf>)> {
+    if dst.exists() && !old.is_some_and(|o| same_path(o, dst)) {
         return Err(io::ErrorKind::AlreadyExists.into());
     }
     let part = partial(dst);
@@ -192,17 +234,33 @@ fn copy_once(src: &File, dst: &Path, progress: Progress) -> io::Result<String> {
     if let Ok(t) = meta.modified() {
         let _ = fo.set_modified(t); // SMB-Freigaben erlauben das nicht immer
     }
-    rename_new(&part, dst)?;
+    let kept = match old {
+        Some(o) => Some(swap(&part, dst, o)?),
+        None => {
+            rename_new(&part, dst)?;
+            None
+        }
+    };
     if fo.metadata()?.len() != meta.len() {
         return Err(err("Zieldatei hat nach dem Kopieren eine andere Größe"));
     }
-    Ok(digest)
+    Ok((digest, kept))
 }
 
-pub fn copy_verified(src: &File, dst: &Path, progress: Progress, tries: u32, mut wait: Duration) -> io::Result<String> {
+pub fn copy_verified(src: &File, dst: &Path, progress: Progress, tries: u32, wait: Duration) -> io::Result<String> {
+    attempt(src, dst, None, progress, tries, wait).map(|r| r.0)
+}
+
+/// Wie `copy`, ersetzt dabei `old`. Gibt zusaetzlich den Ort der beiseitegelegten alten Fassung zurueck.
+pub fn copy_replacing(src: &File, dst: &Path, old: &Path, progress: Progress) -> io::Result<(String, PathBuf)> {
+    let (sha, kept) = attempt(src, dst, Some(old), progress, 5, Duration::from_secs(5))?;
+    Ok((sha, kept.ok_or_else(|| err("alte Fassung nicht beiseitegelegt"))?))
+}
+
+fn attempt(src: &File, dst: &Path, old: Option<&Path>, progress: Progress, tries: u32, mut wait: Duration) -> io::Result<(String, Option<PathBuf>)> {
     let mut attempt = 1;
     loop {
-        let result = dst.parent().map_or(Ok(()), fs::create_dir_all).and_then(|_| copy_once(src, dst, progress));
+        let result = dst.parent().map_or(Ok(()), fs::create_dir_all).and_then(|_| copy_once(src, dst, old, progress));
         match result {
             Err(e) if transient(&e) && attempt < tries => {
                 let end = std::time::Instant::now() + wait;
@@ -224,19 +282,19 @@ pub fn copy(src: &File, dst: &Path, progress: Progress) -> io::Result<String> {
     copy_verified(src, dst, progress, 5, Duration::from_secs(5))
 }
 
-/// Liegengebliebene Teildateien unterhalb der Ordner.
-pub fn leftovers(roots: &[PathBuf]) -> Vec<PathBuf> {
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
+/// Liegengebliebene Teildateien (`PARTIAL`) oder alte Fassungen (`KEPT`) unterhalb der Ordner.
+pub fn leftovers(roots: &[PathBuf], ext: &str) -> Vec<PathBuf> {
+    fn walk(dir: &Path, ext: &str, out: &mut Vec<PathBuf>, depth: u32) {
         for e in fs::read_dir(dir).into_iter().flatten().flatten() {
             let Ok(t) = e.file_type() else { continue };
             if t.is_dir() && depth < 4 {
-                walk(&e.path(), out, depth + 1);
-            } else if t.is_file() && e.path().extension().is_some_and(|x| x == PARTIAL) {
+                walk(&e.path(), ext, out, depth + 1);
+            } else if t.is_file() && e.path().extension().is_some_and(|x| x == ext) {
                 out.push(e.path());
             }
         }
     }
     let mut out = vec![];
-    roots.iter().filter(|r| !r.as_os_str().is_empty()).for_each(|r| walk(r, &mut out, 0));
+    roots.iter().filter(|r| !r.as_os_str().is_empty()).for_each(|r| walk(r, ext, &mut out, 0));
     out
 }

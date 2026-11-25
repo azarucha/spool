@@ -4,7 +4,7 @@
 
 **Recognise, rename and safely transfer your own films, series and music into a Plex library.** A small native
 Windows app (Rust + Tauri). It shows the exact target of every file before anything happens, verifies every copy
-and never overwrites.
+and never overwrites on its own.
 
 [![test](https://github.com/azarucha/spool/actions/workflows/ci.yml/badge.svg)](https://github.com/azarucha/spool/actions/workflows/ci.yml)
 ![license](https://img.shields.io/badge/license-MIT-blue)
@@ -38,7 +38,8 @@ network paths such as `\\server\plex\Movies`. One kind (series, films or music) 
 
 - **Nothing without a click.** The dialog lists every file and target, and exactly that list is transferred. Moving is
   never preselected.
-- **Never overwrites.** An existing target is a conflict.
+- **Never overwrites on its own.** An existing target is a conflict. You can replace a file explicitly, one by one: the
+  old one gives way only after the new copy is verified and in place, and can be kept for undo.
 - **Finished files only.** Files someone is still writing to are neither offered nor transferred.
 - **Verified.** Copies are written as `.spool-partial`, read back past the cache, compared by SHA-256 and only then
   renamed. Interrupted copies resume.

@@ -115,7 +115,7 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .pill { font-size: 12px; font-weight: 600; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; min-width: 106px; flex: none; }
 .pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .pill.sicher, .pill.fertig, .pill.stimmt { color: var(--green); }
-.pill.pruefen { color: var(--amber); }
+.pill.pruefen, .pill.ersetzen { color: var(--amber); }
 .pill.lokal { color: var(--violet); }
 .pill.kein, .pill.konflikt, .pill.fehler, .pill.abweichend, .pill.fehlt { color: var(--red); }
 .pill.vorhanden, .pill.laeuft, .pill.wartet, .pill.rechnet, .pill.berechnet { color: var(--mute); }
@@ -225,3 +225,11 @@ td small { color: var(--mute); display: block; font-size: 12px; overflow-wrap: a
 .row.film { contain-intrinsic-size: auto 76px; }
 .row:focus-visible { outline-offset: -3px; }
 .pair .field { min-width: 0; flex: 1; }
+.cmp { background: var(--fill); border-radius: 12px; padding: 10px 12px 12px; display: grid; gap: 8px; font-size: 12.5px; }
+.cmp div { display: grid; grid-template-columns: 52px 1fr auto; gap: 8px; align-items: baseline; }
+.cmp span, .cmp em { color: var(--mute); font-style: normal; white-space: nowrap; }
+.cmp b { font-weight: 500; overflow-wrap: anywhere; }
+.cmp p { color: var(--amber); }
+.btn.warn { color: var(--red); }
+.plan .swap { color: var(--red); display: block; }
+.sheet .why { margin: 8px 0 0; font-size: 12.5px; }

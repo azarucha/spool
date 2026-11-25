@@ -78,6 +78,24 @@ fn real_network_drive() {
     }
     assert!(fs::read(&film).unwrap() == data[..5_000_000] && !root.join("Neu (2022)").exists() && root.exists());
 
+    // Ersetzen: gleicher Name, alte Fassung aufheben, rueckgaengig; dann endgueltig
+    let old = root.join("Neu (2022)").join("Neu (2022).mkv");
+    fs::create_dir(root.join("Neu (2022)")).unwrap();
+    fs::write(&old, b"alte Fassung").unwrap();
+    for keep in [true, false] {
+        let mut row = Row::new(&film).unwrap();
+        (row.dst, row.replace, row.keep_old) = (Some(old.clone()), Old::of(&old), keep);
+        let mut log = vec![];
+        execute(&mut row, "copy", &mut |e| { log.push(e); Ok(()) }, &quiet).unwrap();
+        println!("Ersetzt: {}", row.note);
+        assert!(fs::read(&old).unwrap() == data[..5_000_000]);
+        assert_eq!(copy::leftovers(std::slice::from_ref(&root), copy::KEPT).len(), keep as usize);
+        if keep {
+            println!("{}", undo(&log[0], &cfg, &mut |_| Ok(()), &quiet).unwrap());
+            assert_eq!(fs::read(&old).unwrap(), b"alte Fassung");
+        }
+    }
+
     // Datei auf dem NAS, in die noch geschrieben wird
     let open = root.join("laeuft.mkv");
     let w = fs::OpenOptions::new().create(true).write(true).truncate(true).open(&open).unwrap();
@@ -92,5 +110,5 @@ fn real_network_drive() {
     execute(&mut row, "move", &mut |_| Ok(()), &quiet).unwrap();
     println!("auf demselben Laufwerk verschoben in {:?}", t.elapsed());
     assert!(root.join("B").join("b.mkv").exists() && !dst.exists());
-    assert!(copy::leftovers(std::slice::from_ref(&root)).is_empty());
+    assert!(copy::leftovers(std::slice::from_ref(&root), copy::PARTIAL).is_empty());
 }

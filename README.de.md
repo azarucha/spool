@@ -20,7 +20,7 @@ Einstellungen, Verlauf und verschlüsselte Schlüssel liegen in `%APPDATA%\Spool
 ## Was Spool zusichert
 
 - **Nichts ohne Klick.** Der Dialog zeigt jede Datei mit Ziel; übertragen wird genau diese Liste. Verschieben ist nie voreingestellt.
-- **Nie überschreiben.** Existiert das Ziel, ist es ein Konflikt.
+- **Nie von selbst überschreiben.** Existiert das Ziel, ist es ein Konflikt. Ersetzen geht nur ausdrücklich je Datei: Die alte Fassung weicht erst, wenn die neue geprüft an ihrem Platz liegt, und lässt sich zum Rückgängigmachen aufheben.
 - **Nur Fertiges.** Dateien, in die noch jemand schreibt, werden weder angeboten noch übertragen.
 - **Geprüft.** Kopien entstehen als `.spool-partial`, werden per SHA-256 am Zwischenspeicher vorbei gegengelesen und erst dann umbenannt. Abbrüche werden fortgesetzt, sobald du dieselbe Datei wieder überträgst.
 - **Löschen zuletzt.** Beim Verschieben zuerst kopieren, dann im Verlauf festhalten, dann löschen. Gelöscht wird endgültig, nicht in den Papierkorb.

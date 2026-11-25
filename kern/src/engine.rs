@@ -21,6 +21,8 @@ pub enum Status {
     None,
     Exists,
     Conflict,
+    /// vorhandene Datei ausdruecklich ersetzen
+    Replace,
     Busy,
     Done,
     Error,
@@ -36,13 +38,14 @@ impl Status {
             Status::None => "kein",
             Exists => "vorhanden",
             Conflict => "konflikt",
+            Replace => "ersetzen",
             Busy => "laeuft",
             Done => "fertig",
             Error => "fehler",
         }
     }
     pub fn checkable(self) -> bool {
-        matches!(self, Safe | Check | Local | Error)
+        matches!(self, Safe | Check | Local | Error | Replace)
     }
 }
 
@@ -381,6 +384,21 @@ impl Finder {
 
 // ---------------------------------------------------------------- Zeilen
 
+/// Eine schon vorhandene Datei, so wie sie beim Entscheiden aussah.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Old {
+    pub path: PathBuf,
+    pub len: u64,
+    pub modified: Option<SystemTime>,
+}
+
+impl Old {
+    pub fn of(p: &Path) -> Option<Old> {
+        let m = fs::metadata(p).ok()?;
+        Some(Old { path: p.into(), len: m.len(), modified: m.modified().ok() })
+    }
+}
+
 #[derive(Clone)]
 pub struct Row {
     pub src: PathBuf,
@@ -405,6 +423,12 @@ pub struct Row {
     pub auto: bool,
     /// Staffel und erste Folge von Hand
     pub by_hand: Option<(u32, u32)>,
+    /// vorhandene Datei, die ersetzt werden koennte
+    pub old: Option<Old>,
+    /// vom Nutzer ausdruecklich zum Ersetzen freigegeben
+    pub replace: Option<Old>,
+    /// alte Fassung nach dem Ersetzen aufheben
+    pub keep_old: bool,
     dup: Option<(Status, bool, String)>,
     pub folder: String,
     pub source_error: String,
@@ -431,6 +455,9 @@ impl Row {
             searched: false,
             auto: false,
             by_hand: Option::None,
+            old: Option::None,
+            replace: Option::None,
+            keep_old: false,
             dup: Option::None,
             folder: String::new(),
             source_error: String::new(),
@@ -562,7 +589,7 @@ pub fn resolve(row: &mut Row, cfg: &Settings, tv: &Library, movies: &Library) {
     let cand = row.cand().cloned();
     let kind = cand.as_ref().map_or(media.kind, |c| c.kind());
     let lib = if kind == Kind::Tv { tv } else { movies };
-    (row.dst, row.checked, row.note, row.dup) = (Option::None, false, String::new(), Option::None);
+    (row.dst, row.checked, row.note, row.dup, row.old) = (Option::None, false, String::new(), Option::None, Option::None);
     let mut reason = String::new();
     let mut missing = false;
     let because = |reason: &mut String, text: String| {
@@ -699,22 +726,37 @@ pub fn resolve(row: &mut Row, cfg: &Settings, tv: &Library, movies: &Library) {
 
     let parent = dst.parent().unwrap_or(&lib.root).to_path_buf();
     let mut present = Option::None;
+    let mut hard = ""; // warum sich die vorhandene Datei nicht einfach ersetzen laesst
     if kind == Kind::Tv {
         let have = lib.show(&folder);
         present = eps.iter().find_map(|n| have.episodes.get(&(code.0, *n)).cloned());
+        if present.as_ref().is_some_and(|p| have.episodes.iter().any(|(k, f)| f == p && !(k.0 == code.0 && eps.contains(&k.1)))) {
+            hard = "sie enthält weitere Folgen";
+        }
     } else if parent != lib.root {
         let vids: Vec<PathBuf> = fs::read_dir(&parent).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| is_video(p)).collect();
-        present = vids.iter().find(|v| len_of(v) == row.size).or(vids.first()).cloned();
+        let named = vids.iter().find(|v| stem_of(v).to_lowercase() == stem_of(&dst).to_lowercase());
+        if named.is_none() && vids.len() > 1 {
+            hard = "im Ordner liegen mehrere Videos";
+        }
+        present = named.or(vids.iter().find(|v| len_of(v) == row.size)).or(vids.first()).cloned();
     }
     if dst.exists() {
+        if kind != Kind::Tv {
+            hard = "";
+        }
         present = Some(dst.clone());
     }
     if let Some(p) = present {
+        if replacing(row, &p, dst, hard, cfg) {
+            return;
+        }
         if len_of(&p) == row.size {
             (row.status, row.note) = (Exists, "liegt schon in Plex, gleiche Größe".into());
         } else {
             let n = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
-            (row.status, row.note) = (Conflict, format!("andere Datei vorhanden: {n}"));
+            let why = if hard.is_empty() { String::new() } else { format!(" (lässt sich nicht ersetzen, {hard})") };
+            (row.status, row.note) = (Conflict, format!("andere Datei vorhanden: {n}{why}"));
         }
         row.dst = Some(p);
         return;
@@ -725,6 +767,25 @@ pub fn resolve(row: &mut Row, cfg: &Settings, tv: &Library, movies: &Library) {
         return;
     }
     row.checked = row.status == Safe;
+}
+
+/// Merkt sich die ersetzbare Datei und stellt die Zeile auf "Ersetzen", wenn der Nutzer genau diese freigegeben hat.
+pub fn replacing(row: &mut Row, present: &Path, dst: PathBuf, hard: &str, cfg: &Settings) -> bool {
+    let itself = copy::same_path(&row.src, present);
+    row.old = if hard.is_empty() && !itself { Old::of(present) } else { Option::None };
+    if row.replace.is_none() || row.replace != row.old {
+        row.replace = Option::None;
+        return false;
+    }
+    let name = present.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let doubt = if row.note.is_empty() { String::new() } else { format!("; Achtung: {}", row.note) };
+    row.dst = Some(dst);
+    if let Some(why) = occupied(row, cfg) {
+        (row.status, row.note) = (Busy, why);
+        return true;
+    }
+    (row.status, row.checked, row.note) = (Replace, true, format!("ersetzt {name}{doubt}"));
+    true
 }
 
 /// Platzhalter, die Datenquellen vor der Ausstrahlung eintragen.
@@ -757,7 +818,7 @@ pub fn mark_duplicates<'a>(rows: impl Iterator<Item = &'a mut Row>) {
         if let Some((s, c, n)) = r.dup.take() {
             (r.status, r.checked, r.note) = (s, c, n);
         }
-        let Some(dst) = r.dst.clone().filter(|_| matches!(r.status, Safe | Check | Local)) else { continue };
+        let Some(dst) = r.dst.clone().filter(|_| matches!(r.status, Safe | Check | Local | Replace)) else { continue };
         let mut keys = vec![dst.with_extension("").to_string_lossy().to_lowercase()];
         if r.kind() == Kind::Tv {
             let (season, eps) = r.episode();
@@ -874,6 +935,11 @@ pub struct Entry {
     /// dabei gelernte Zuordnung
     #[serde(default)]
     pub alias: String,
+    /// beiseitegelegte alte Fassung und ihr frueherer Pfad
+    #[serde(default)]
+    pub alt: String,
+    #[serde(default)]
+    pub alt_pfad: String,
 }
 
 pub fn stamp() -> String {
@@ -910,12 +976,21 @@ pub fn execute(row: &mut Row, action: &str, log: Log, progress: Progress) -> io:
         sha256,
         quellen: quellen.clone(),
         alias: alias.into(),
+        alt: String::new(),
+        alt_pfad: String::new(),
     };
     let mut notes: Vec<String> = vec![];
     let mut sources: Vec<(PathBuf, fs::File)> = vec![]; // offene Griffe: bis zum Loeschen schreibt niemand
     let mut jobs = vec![(row.src.clone(), dst.clone())];
     jobs.extend(sidecars(&row.src).into_iter().map(|(p, rest)| (p, dst.with_file_name(format!("{stem}{rest}")))));
     let mut complete = true;
+    let mut aside: Option<PathBuf> = Option::None;
+    if let Some(o) = &row.replace {
+        if Old::of(&o.path).as_ref() != Some(o) {
+            return Err(io::Error::other("Die vorhandene Datei hat sich seit deiner Entscheidung geändert"));
+        }
+    }
+    let replace = row.replace.as_ref().map(|o| o.path.clone());
     for (n, (src, dst)) in jobs.into_iter().enumerate() {
         let main = n == 0;
         if !main && dst.exists() {
@@ -926,24 +1001,50 @@ pub fn execute(row: &mut Row, action: &str, log: Log, progress: Progress) -> io:
         let one = (|| {
             let held = copy::hold(&src)?;
             let len = held.metadata()?.len();
+            let old = replace.as_deref().filter(|_| main);
+            let noted = |sha: String, kept: Option<&PathBuf>| {
+                let mut e = entry(&src, &dst, len, sha, if main { &alias } else { "" });
+                if let (Some(k), Some(o)) = (kept, old) {
+                    (e.alt, e.alt_pfad) = (k.to_string_lossy().into(), o.to_string_lossy().into());
+                }
+                e
+            };
             if action == "move" {
                 // Gleiches Laufwerk: umbenennen statt doppelt Platz zu brauchen
                 dst.parent().map_or(Ok(()), fs::create_dir_all)?;
-                match copy::rename_new(&src, &dst) {
-                    Ok(()) => {
+                let placed = match old {
+                    Some(o) => copy::swap(&src, &dst, o).map(Some),
+                    Option::None => copy::rename_new(&src, &dst).map(|_| Option::None),
+                };
+                match placed {
+                    Ok(kept) => {
                         let sha = copy::sha256_held(&held, progress);
-                        if let Err(e) = sha.and_then(|s| log(entry(&src, &dst, len, s, if main { &alias } else { "" }))) {
+                        if let Err(e) = sha.and_then(|s| log(noted(s, kept.as_ref()))) {
                             copy::rename_new(&dst, &src)?; // ohne Verlauf kein Verschieben
+                            if let (Some(k), Some(o)) = (kept, old) {
+                                copy::rename_new(&k, o)?;
+                            }
                             return Err(e);
                         }
+                        aside = kept.or(aside.take());
                         return Ok(());
                     }
                     Err(e) if copy::other_volume(&e) => {}
                     Err(e) => return Err(e),
                 }
             }
-            let sha = copy::copy(&held, &dst, progress)?;
-            log(entry(&src, &dst, len, sha, if main { &alias } else { "" }))?;
+            let (sha, kept) = match old {
+                Some(o) => copy::copy_replacing(&held, &dst, o, progress).map(|r| (r.0, Some(r.1)))?,
+                Option::None => (copy::copy(&held, &dst, progress)?, Option::None),
+            };
+            if let Err(e) = log(noted(sha, kept.as_ref())) {
+                if let (Some(k), Some(o)) = (kept, old) {
+                    fs::remove_file(&dst)?; // ohne Verlauf bleibt die alte Fassung
+                    copy::rename_new(&k, o)?;
+                }
+                return Err(e);
+            }
+            aside = kept.or(aside.take());
             sources.push((src.clone(), held));
             Ok(())
         })();
@@ -966,6 +1067,15 @@ pub fn execute(row: &mut Row, action: &str, log: Log, progress: Progress) -> io:
             }
         } else {
             notes.push("Originale deshalb behalten".into());
+        }
+    }
+    if let Some(k) = aside {
+        if row.keep_old {
+            notes.push("alte Fassung aufgehoben".into());
+        } else if fs::remove_file(&k).is_err() {
+            notes.push(format!("alte Fassung konnte nicht gelöscht werden: {}", k.display()));
+        } else {
+            notes.push("alte Fassung gelöscht".into());
         }
     }
     notes.insert(0, "übertragen und geprüft".into());
@@ -1003,6 +1113,9 @@ pub fn undo(e: &Entry, cfg: &Settings, log: Log, progress: Progress) -> io::Resu
     if !dst.exists() {
         return fail("Die Zieldatei gibt es nicht mehr");
     }
+    if !e.alt.is_empty() && !Path::new(&e.alt).exists() {
+        return fail("Die ersetzte alte Fassung ist gelöscht, deshalb geht Rückgängig hier nicht");
+    }
     let held = copy::hold(dst)?;
     if copy::sha256_held(&held, progress)? != e.sha256 {
         return fail("Die Zieldatei wurde seitdem verändert");
@@ -1018,6 +1131,9 @@ pub fn undo(e: &Entry, cfg: &Settings, log: Log, progress: Progress) -> io::Resu
     }
     fs::remove_file(dst)?;
     drop(held);
+    if !e.alt.is_empty() {
+        copy::rename_new(Path::new(&e.alt), Path::new(&e.alt_pfad))?;
+    }
     log(Entry { zeit: stamp(), aktion: "undo".into(), ..e.clone() })?;
     for dir in dst.ancestors().skip(1).take(2) {
         // nur leere Ordner, nie die Bibliothek selbst

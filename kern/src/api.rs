@@ -143,7 +143,7 @@ fn example(key: &str) -> Values {
 
 /// Von Hand Entschiedenes, das ein neuer Abgleich nicht verwerfen darf.
 fn decided(r: &Row) -> bool {
-    r.approved || r.confirmed || r.manual.is_some() || r.by_hand.is_some()
+    r.approved || r.confirmed || r.manual.is_some() || r.by_hand.is_some() || r.replace.is_some()
 }
 
 const SUB_ID: &str = "opensubtitles";
@@ -616,7 +616,7 @@ impl Api {
 
     // ------------------------------------------------ Uebertragen
     /// Uebertraegt genau die im Dialog gezeigten Zeilen, mit genau dem gezeigten Ziel.
-    fn transfer(self: &Arc<Self>, list: &Value, action: &str) -> String {
+    fn transfer(self: &Arc<Self>, list: &Value, action: &str, keep_old: bool) -> String {
         if !matches!(action, "copy" | "move") {
             return "Unbekannte Aktion".into();
         }
@@ -632,6 +632,10 @@ impl Api {
                 let Some(dst) = r.dst.clone().filter(|d| x["dst"].as_str() == Some(&text_of(d))) else {
                     return "Ein Ziel hat sich geändert, bitte noch einmal prüfen.".into();
                 };
+                let old = r.replace.as_ref().map(|o| text_of(&o.path));
+                if x["old"].as_str() != old.as_deref() {
+                    return "Was ersetzt wird, hat sich geändert, bitte noch einmal prüfen.".into();
+                }
                 todo.push((i, r.size, dst, r.kind()));
             }
         }
@@ -676,6 +680,7 @@ impl Api {
                     a.put(id, row);
                     continue;
                 }
+                row.keep_old = keep_old;
                 let result = execute(&mut row, &action, &mut |e| add_history(&e), &a.meter());
                 match result {
                     Ok(()) => {
@@ -980,13 +985,23 @@ impl Api {
             }),
             "partials" => {
                 let cfg = self.cfg();
-                let list = copy::leftovers(&[&cfg.tv, &cfg.movies, &cfg.music].map(PathBuf::from));
+                let ext = if text(0) == "alt" { copy::KEPT } else { copy::PARTIAL };
+                let list = copy::leftovers(&[&cfg.tv, &cfg.movies, &cfg.music].map(PathBuf::from), ext);
                 return list.iter().map(|p| json!({ "path": text_of(p), "bytes": fs::metadata(p).map(|m| m.len()).unwrap_or(0) })).collect();
             }
             "partial_delete" if idle => {
                 let (cfg, p) = (self.cfg(), PathBuf::from(text(0)));
-                if copy::leftovers(&[&cfg.tv, &cfg.movies, &cfg.music].map(PathBuf::from)).contains(&p) {
+                let roots = [&cfg.tv, &cfg.movies, &cfg.music].map(PathBuf::from);
+                if [copy::PARTIAL, copy::KEPT].iter().any(|e| copy::leftovers(&roots, e).contains(&p)) {
                     return json!(fs::remove_file(&p).err().map(|e| e.to_string()).unwrap_or_default());
+                }
+            }
+            "alt_restore" if idle => {
+                let (cfg, p) = (self.cfg(), PathBuf::from(text(0)));
+                let roots = [&cfg.tv, &cfg.movies, &cfg.music].map(PathBuf::from);
+                if copy::leftovers(&roots, copy::KEPT).contains(&p) {
+                    let back = copy::original_name(&p).ok_or_else(|| "Unbekannter Name".to_string());
+                    return json!(back.and_then(|o| copy::rename_new(&p, &o).map_err(|_| "Dort liegt inzwischen eine andere Datei. Bitte diese zuerst entfernen.".into())).err().unwrap_or_default());
                 }
             }
             "cache_clear" => sources::clear_cache(),
@@ -1032,7 +1047,7 @@ impl Api {
             "remove_watch" => self.change(|c| c.folders.retain(|f| *f != text(0))),
             "save_key" => return json!(self.save_key(&text(0), &text(1))),
             "undo" => return json!(self.undo(int(0) as usize)),
-            "transfer" => return json!(self.transfer(args.first().unwrap_or(&Value::Null), &text(1))),
+            "transfer" => return json!(self.transfer(args.first().unwrap_or(&Value::Null), &text(1), flag(2))),
             // Ab hier nur, wenn nichts laeuft
             _ if !idle => return json!("Es läuft gerade noch etwas anderes."),
             "clear" | "remove" => {
@@ -1099,6 +1114,7 @@ impl Api {
             }
             "set_episode" => self.set_episode(ids(), int(1) as u32, int(2) as u32),
             "rename" => self.rename(int(0), &text(1)),
+            "replace" => self.rebuild(&ids(), |_, r| r.replace = if flag(1) { r.old.clone() } else { None }),
             _ => {}
         }
         Value::Null
@@ -1223,6 +1239,7 @@ fn row_json(id: u64, r: &Row, lang: &str) -> Value {
         "checkable": r.dst.is_some() && r.status.checkable(),
         "name": r.dst.as_ref().map(|d| stem_of(d)).unwrap_or_default(),
         "dst": r.dst.as_ref().map(|d| text_of(d)).unwrap_or_default(),
+        "old": r.old.as_ref().map(|o| json!({ "path": text_of(&o.path), "name": file_name(&o.path), "size": o.len })), "replace": r.replace.is_some(),
         "folder": r.folder, "season": season, "episode": eps.first(),
         "title": c.map(|c| c.title(lang).to_string()).or_else(|| r.track.as_ref().map(album)).unwrap_or_else(|| if m.title.is_empty() { stem_of(&r.src) } else { m.title.clone() }),
         "year": c.map_or(m.year.or(r.track.as_ref().and_then(|t| t.year)), |c| c.year()), "kind": r.kind().as_str(), "query": m.title,

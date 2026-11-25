@@ -124,6 +124,8 @@ pub fn entry(f: &Path) -> Entry {
         sha256: crate::copy::sha256(f, &crate::copy::quiet).unwrap_or_default(),
         quellen: vec!["opensubtitles".into()],
         alias: String::new(),
+        alt: String::new(),
+        alt_pfad: String::new(),
     }
 }
 

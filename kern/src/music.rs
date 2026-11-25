@@ -1,5 +1,5 @@
 //! Musik: Ziel aus den eingebetteten Tags, Plex-Aufbau Kuenstler/Album/01 - Titel.
-use crate::engine::{occupied, Row, Settings, Status};
+use crate::engine::{occupied, replacing, Row, Settings, Status};
 use crate::names::{ext_of, is_dir, norm, safe_name, short, stem_of, AUDIO};
 use lofty::prelude::*;
 use std::collections::HashMap;
@@ -56,7 +56,7 @@ fn folder(root: &Path, name: &str) -> PathBuf {
 }
 
 pub fn resolve(row: &mut Row, cfg: &Settings) {
-    (row.dst, row.checked, row.note, row.folder) = (None, false, String::new(), String::new());
+    (row.dst, row.checked, row.note, row.folder, row.old) = (None, false, String::new(), String::new(), None);
     let root = Path::new(&cfg.music);
     let Some(t) = row.track.clone().filter(|t| !t.artist.is_empty() && !t.title.is_empty()) else {
         (row.status, row.note) = (Status::None, "Musik-Tags fehlen (Künstler oder Titel)".into());
@@ -79,6 +79,9 @@ pub fn resolve(row: &mut Row, cfg: &Settings) {
     row.folder = dir.strip_prefix(root).unwrap_or(&dir).to_string_lossy().into_owned();
     let twin = fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.path()).find(|p| is_audio(p) && stem_of(p).to_lowercase() == stem.to_lowercase());
     if let Some(p) = twin {
+        if replacing(row, &p, dst, "", cfg) {
+            return;
+        }
         let same = fs::metadata(&p).is_ok_and(|m| m.len() == row.size);
         row.status = if same { Status::Exists } else { Status::Conflict };
         row.note = if same { "liegt schon in Plex, gleiche Größe".into() } else { "anderer Titel gleichen Namens vorhanden".into() };
