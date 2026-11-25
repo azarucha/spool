@@ -1,0 +1,25 @@
+[package]
+name = "kern"
+version = "0.9.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+fancy-regex = "0.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+crc32fast = "1"
+unicode-normalization = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+lofty = "0.22"
+native-tls = "0.2"
+ureq = { version = "2.12", default-features = false, features = ["native-tls", "json"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tempfile = "3"
+lofty = "0.22"
+crc32fast = "1"

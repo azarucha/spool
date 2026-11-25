@@ -1,0 +1,9 @@
+{
+  "bundle": {
+    "resources": {
+      "../THIRD-PARTY.txt": "THIRD-PARTY.txt",
+      "../LICENSE": "LICENSE.txt",
+      "vendor/WebView2Loader.dll": "WebView2Loader.dll"
+    }
+  }
+}

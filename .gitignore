@@ -1,0 +1,10 @@
+target/
+*.exe
+app/vendor/
+app/gen/
+settings.json
+aliases.json
+keys.bin
+verlauf.jsonl
+*.log
+.claude/
